@@ -5,3 +5,6 @@ venv/
 riwayat/
 photobooth.log*
 qr_share_internet.png
+.env
+.env.*
+!.env.example
