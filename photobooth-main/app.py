@@ -11,8 +11,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from camera_engine import PhotoBoothEngine, list_available_cameras
+from camera_engine import PhotoBoothEngine, list_available_cameras, get_group_guide_box
 from preview_window import PreviewWindow
+from upscale_window import UpscaleWindow
+from upscale_engine import AIUpscaler
 from filter_engine import apply_filter, get_filter_name, FILTER_COUNT
 from idle_timer import IdleTimer
 from ui.home import HomePage
@@ -337,6 +339,7 @@ class LiveCamSidebar(ctk.CTkFrame):
             self.PREVIEW_W // 2, self.PREVIEW_H // 2, image=tk_img
         )
 
+
 # ══════════════════════════════════════════════════════════════════
 # Main App
 # ══════════════════════════════════════════════════════════════════
@@ -351,20 +354,23 @@ class App(ctk.CTk):
         self.minsize(900, 600)
         self.configure(fg_color=BG_DARK)
 
-        # State dasar aplikasi.
-        # Dibutuhkan oleh beberapa fungsi lama di app.py.
+        # State dasar aplikasi
         self._closing = False
         self._session_active = False
         self._session_cancel = threading.Event()
         self._ui_queue = queue.Queue()
         self._ui_after = None
         self._selected_template = None
+        self._selected_scale = 1
+        self._upscale_window = None
+        self.timer_var = ctk.StringVar(value="6")
         self.templates = []
         self._template_cards = []
 
         # Shortcut dasar
-        self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
+        self.bind("<Escape>", self._handle_escape)
         self.bind("<F11>", self.toggle_fullscreen)
+        self.bind("<space>", self._start_configured_session)
         self.current_page = None
 
         self.page_container = ctk.CTkFrame(
@@ -383,10 +389,31 @@ class App(ctk.CTk):
         # Halaman pertama
         self.show_home_page()
 
+    def _handle_escape(self, event=None):
+        if self._session_active:
+            self._cancel_current_session()
+        else:
+            self.attributes("-fullscreen", False)
+
+    def _cancel_current_session(self):
+        if not self._session_active or self._closing:
+            return
+        self._session_cancel.set()
+        if hasattr(self, "cancel_session_button"):
+            self.cancel_session_button.configure(state="disabled")
+        if hasattr(self, "status_label"):
+            self.status_label.configure(text="⏳ Membatalkan sesi...", text_color=ORANGE)
+
+        # Jika window pilihan upscale sedang terbuka, tutup dengan aman
+        if self._upscale_window is not None and self._upscale_window.winfo_exists():
+            try:
+                self._upscale_window._handle_close()
+            except Exception:
+                pass
+
     def toggle_fullscreen(self, event=None):
         fullscreen_now = self.attributes("-fullscreen")
         self.attributes("-fullscreen", not fullscreen_now)
-
 
     def start_selected_template(self, template_data):
         self._selected_template = template_data
@@ -412,15 +439,16 @@ class App(ctk.CTk):
         self.capture_status.configure(
             text=(
                 f"{template_name}\n\n"
-                "Kamera sedang disiapkan..."
+                "Atur timer di panel kanan, lalu klik Mulai Sesi Foto."
             )
         )
 
-        # Beri waktu singkat agar live camera selesai dibuka.
-        self.after(
-            800,
-            lambda: self.on_template_select(template_data)
-        )
+        # Jangan mulai otomatis. Pengguna diberi waktu mengatur timer.
+        if hasattr(self, "start_session_button"):
+            self.start_session_button.configure(state="normal")
+        if hasattr(self, "timer_entry"):
+            self.timer_entry.focus_set()
+            self.timer_entry.select_range(0, "end")
 
     def _prepare_photo_interface(self):
         self.configure(fg_color=BG_DARK)
@@ -647,6 +675,7 @@ class App(ctk.CTk):
             text_color=FG_MUTED,
         )
         self.loading_label.grid(row=1, column=0, columnspan=3, pady=40)
+
     def _select_template_card(self, selected_card):
         for card in getattr(self, "_template_cards", []):
             card.set_selected(card is selected_card)
@@ -700,6 +729,47 @@ class App(ctk.CTk):
         # Live camera
         self.live_cam = LiveCamSidebar(self.sidebar)
         self.live_cam.pack(padx=14, pady=(0, 10), fill="x")
+
+        # Timer manual 2-10 detik.
+        timer_card = ctk.CTkFrame(self.sidebar, fg_color=BG_CARD, corner_radius=CORNER_RADIUS, border_width=1, border_color=BORDER)
+        timer_card.pack(padx=14, pady=(0, 10), fill="x")
+        ctk.CTkLabel(timer_card, text="⏱  Timer sebelum foto", font=("Segoe UI", 12, "bold"), text_color=FG_TEXT).pack(anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(timer_card, text="Ketik angka 2 sampai 10 detik", font=("Segoe UI", 9), text_color=FG_MUTED).pack(anchor="w", padx=14, pady=(0, 8))
+        timer_control = ctk.CTkFrame(timer_card, fg_color="transparent")
+        timer_control.pack(padx=12, pady=(0, 12), fill="x")
+        validate_timer = (self.register(self._validate_timer_keystroke), "%P")
+        self.timer_entry = ctk.CTkEntry(
+            timer_control, textvariable=self.timer_var, height=38, justify="center",
+            placeholder_text="2-10", font=("Segoe UI", 13, "bold"),
+            text_color=ORANGE, fg_color=BG_SURFACE, border_color=BORDER,
+            corner_radius=10, validate="key", validatecommand=validate_timer,
+        )
+        self.timer_entry.pack(side="left", fill="x", expand=True)
+        self.timer_entry.bind("<Return>", self._normalize_timer_input)
+        self.timer_entry.bind("<FocusOut>", self._normalize_timer_input)
+        ctk.CTkLabel(timer_control, text="detik", width=48, font=("Segoe UI", 11, "bold"), text_color=FG_MUTED).pack(side="left", padx=(8, 0))
+
+        self.start_session_button = ctk.CTkButton(
+            self.sidebar,
+            text="▶  Mulai Sesi Foto",
+            command=self._start_configured_session,
+            fg_color=GREEN,
+            hover_color="#2bbf9d",
+            text_color=BG_DARK,
+            font=("Segoe UI", 11, "bold"),
+            height=42,
+            corner_radius=10,
+            state="normal",
+        )
+        self.start_session_button.pack(padx=14, pady=(0, 8), fill="x")
+
+        self.cancel_session_button = ctk.CTkButton(
+            self.sidebar, text="✕  Batalkan sesi", command=self._cancel_current_session,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=FG_TEXT,
+            font=("Segoe UI", 11, "bold"), height=38, corner_radius=10,
+            state="disabled",
+        )
+        self.cancel_session_button.pack(padx=14, pady=(0, 10), fill="x")
 
         # Info card
         info = ctk.CTkFrame(self.sidebar, fg_color=BG_CARD, corner_radius=CORNER_RADIUS, border_width=1, border_color=BORDER)
@@ -888,6 +958,20 @@ class App(ctk.CTk):
 
     # ── Template selection → engine ──────────────────────────────
 
+    def _start_configured_session(self, event=None):
+        """Mulai sesi hanya setelah pengguna selesai mengatur timer."""
+        if self._closing or self._session_active or self._selected_template is None:
+            return
+
+        # Jangan mulai saat Space dipakai untuk mengetik di Entry.
+        focused = self.focus_get()
+        if event is not None and focused is self.timer_entry:
+            return
+
+        self._normalize_timer_input()
+        self.focus_set()
+        self.on_template_select(self._selected_template)
+
     def on_template_select(self, template_data):
         if self._session_active or self._closing:
             return
@@ -906,17 +990,55 @@ class App(ctk.CTk):
             messagebox.showerror("Kamera Sibuk", "Kamera belum selesai merespons. Tunggu sebentar lalu coba lagi.")
             return
 
-        # Jalankan di thread terpisah agar UI tidak freeze
-        threading.Thread(
-            target=self._run_session,
-            args=(template_data, self._cam_index(), self.live_cam.current_filter),
-            daemon=True,
-        ).start()
+        self.live_cam.canvas.delete("all")
+        self.live_cam.canvas.image = None
+        self.live_cam.canvas.create_text(
+            self.live_cam.PREVIEW_W // 2, self.live_cam.PREVIEW_H // 2,
+            text="Sesi foto sedang berjalan", fill=FG_MUTED,
+            font=("Segoe UI", 11, "bold"),
+        )
 
-    def _run_session(self, template_data, cam_index, filter_idx):
+        # Beri driver kamera Windows waktu singkat untuk melepas handle preview.
+        # Tanpa jeda ini, CAP_DSHOW kadang terbuka tetapi mengirim frame hitam.
+        session_args = (
+            template_data,
+            self._cam_index(),
+            self.live_cam.current_filter,
+            self._selected_timer_seconds(),
+        )
+        self.after(
+            450,
+            lambda: threading.Thread(
+                target=self._run_session,
+                args=session_args,
+                daemon=True,
+            ).start(),
+        )
+
+    def _validate_timer_keystroke(self, proposed_value):
+        return proposed_value == "" or (proposed_value.isdigit() and len(proposed_value) <= 2)
+
+    def _normalize_timer_input(self, event=None):
+        try:
+            seconds = int(self.timer_var.get().strip())
+        except (TypeError, ValueError):
+            seconds = 6
+        seconds = max(2, min(10, seconds))
+        self.timer_var.set(str(seconds))
+        if event is not None and getattr(event, "keysym", "") == "Return":
+            self.focus_set()
+        return seconds
+
+    def _selected_timer_seconds(self):
+        return self._normalize_timer_input()
+
+    def _run_session(self, template_data, cam_index, filter_idx, timer_seconds):
         try:
             engine = PhotoBoothEngine(
-                template_data, camera_index=cam_index, cancel_event=self._session_cancel
+                template_data,
+                camera_index=cam_index,
+                cancel_event=self._session_cancel,
+                timer_seconds=timer_seconds,
             )
             engine.filter_idx = filter_idx
             success = engine.capture()
@@ -925,6 +1047,65 @@ class App(ctk.CTk):
             if not success or self._session_cancel.is_set():
                 self._finish_session()
                 return
+
+            # Selesai foto -> buka window preview mentah & pilihan scale 1x / 2x / 3x
+            self._run_on_ui(self._open_upscale_window, engine)
+        except Exception as e:
+            logging.exception("Sesi foto gagal")
+            self._run_on_ui(
+                messagebox.showerror,
+                "Sesi Foto Gagal",
+                f"Sesi tidak dapat diselesaikan:\n{e}\n\nSilakan coba lagi.",
+            )
+            self._finish_session()
+
+    def _open_upscale_window(self, engine):
+        if self._closing or self._session_cancel.is_set():
+            self._finish_session_ui()
+            return
+
+        self.status_label.configure(
+            text="✨ Pilih skala AI Upscale (1x / 2x / 3x)...",
+            text_color=ORANGE,
+        )
+
+        def handle_upscale_confirm(upscaled_photos, scale):
+            self._upscale_window = None
+            self._selected_scale = scale
+            engine.output_scale = scale
+            engine.photos = upscaled_photos
+            # Perbarui koordinat crop agar sesuai dengan dimensi baru setelah upscale
+            engine.photo_boxes = [
+                get_group_guide_box(img.shape[1], img.shape[0])
+                for img in upscaled_photos
+            ]
+
+            self.status_label.configure(
+                text=f"🎨 Memasukkan foto ({scale}x) ke template...",
+                text_color=ORANGE,
+            )
+            threading.Thread(
+                target=self._process_after_upscale,
+                args=(engine, scale),
+                daemon=True,
+            ).start()
+
+        def handle_upscale_cancel():
+            self._upscale_window = None
+            self.status_label.configure(text="●  Sesi dibatalkan", text_color=FG_MUTED)
+            self._finish_session_ui()
+
+        self._upscale_window = UpscaleWindow(
+            self,
+            raw_photos_bgr=engine.photos,
+            on_confirm=handle_upscale_confirm,
+            on_cancel=handle_upscale_cancel,
+        )
+
+    def _process_after_upscale(self, engine, scale=1):
+        try:
+            if scale > 1:
+                engine.save_raw_photos(suffix=f"upscale_{scale}x")
             result = engine.process()
             if not result:
                 self._finish_session()
@@ -932,8 +1113,12 @@ class App(ctk.CTk):
             composite_path, gif_path = result
             self._run_on_ui(self._show_preview, engine, composite_path, gif_path)
         except Exception as e:
-            logging.exception("Sesi foto gagal")
-            self._run_on_ui(messagebox.showerror, "Sesi Foto Gagal", f"Sesi tidak dapat diselesaikan:\n{e}\n\nSilakan coba lagi.")
+            logging.exception("Gagal memproses template setelah upscale")
+            self._run_on_ui(
+                messagebox.showerror,
+                "Proses Template Gagal",
+                f"Gagal memasukkan foto ke template:\n{e}",
+            )
             self._finish_session()
 
     def _show_preview(self, engine, composite_path, gif_path):
@@ -983,11 +1168,20 @@ class App(ctk.CTk):
                 messagebox.showerror("Kamera Sibuk", "Tunggu sebentar lalu pilih template lagi.")
                 return
             self.status_label.configure(text="🔄 Retake...", text_color=ORANGE)
-            threading.Thread(
-                target=self._run_session,
-                args=(engine.config, engine.camera_index, engine.filter_idx),
-                daemon=True,
-            ).start()
+            retake_args = (
+                engine.config,
+                engine.camera_index,
+                engine.filter_idx,
+                engine.timer_seconds,
+            )
+            self.after(
+                450,
+                lambda: threading.Thread(
+                    target=self._run_session,
+                    args=retake_args,
+                    daemon=True,
+                ).start(),
+            )
 
         def do_retake_one(photo_index):
             self._session_cancel.clear()
@@ -998,11 +1192,14 @@ class App(ctk.CTk):
                 self._run_on_ui(self._show_retake_preview, engine, composite_path, gif_path, "Kamera masih sibuk")
                 return
             self.status_label.configure(text=f"🔄 Mengulang foto {photo_index + 1}...", text_color=ORANGE)
-            threading.Thread(
-                target=self._run_single_retake,
-                args=(engine, photo_index, composite_path, gif_path),
-                daemon=True,
-            ).start()
+            self.after(
+                450,
+                lambda: threading.Thread(
+                    target=self._run_single_retake,
+                    args=(engine, photo_index, composite_path, gif_path),
+                    daemon=True,
+                ).start(),
+            )
 
         def do_save():
             self.status_label.configure(
@@ -1026,21 +1223,53 @@ class App(ctk.CTk):
         try:
             candidate = engine.retake_photo(photo_index)
             if candidate is not None and not self._session_cancel.is_set():
+                scale = getattr(self, "_selected_scale", 1)
+                candidate.output_scale = scale
+                if scale > 1:
+                    upscaler = AIUpscaler()
+                    upscaled_img = upscaler.upscale_image(
+                        candidate.photos[photo_index], scale
+                    )
+                    candidate.photos[photo_index] = upscaled_img
+                    candidate.photo_boxes[photo_index] = get_group_guide_box(
+                        upscaled_img.shape[1], upscaled_img.shape[0]
+                    )
+                    candidate.save_raw_photos(suffix=f"upscale_{scale}x")
                 result = candidate.process()
                 if not result:
                     raise RuntimeError("Hasil foto ulang tidak dapat diproses.")
-                self._run_on_ui(self._show_retake_preview, candidate, *result, f"✅ Foto {photo_index + 1} sudah diperbarui")
+                self._run_on_ui(
+                    self._show_retake_preview,
+                    candidate,
+                    *result,
+                    f"✅ Foto {photo_index + 1} sudah diperbarui",
+                )
                 return
         except Exception as e:
             logging.exception("Retake satu foto gagal")
-            self._run_on_ui(messagebox.showerror, "Retake Gagal", f"Foto sebelumnya tetap tersedia.\n{e}")
-        self._run_on_ui(self._show_retake_preview, engine, composite_path, gif_path, "Hasil sebelumnya tetap tersedia")
+            self._run_on_ui(
+                messagebox.showerror,
+                "Retake Gagal",
+                f"Foto sebelumnya tetap tersedia.\n{e}",
+            )
+        self._run_on_ui(
+            self._show_retake_preview,
+            engine,
+            composite_path,
+            gif_path,
+            "Hasil sebelumnya tetap tersedia",
+        )
 
     def _show_retake_preview(self, engine, composite_path, gif_path, status):
         if self._closing:
             return
         self.status_label.configure(text=status, text_color=GREEN)
         self._show_preview(engine, composite_path, gif_path)
+
+    def _finish_session(self):
+        """Selesaikan sesi dari thread mana pun melalui antrean UI Tkinter."""
+        if not self._closing:
+            self._run_on_ui(self._finish_session_ui)
 
     def _finish_session_ui(self):
         if self._closing:
@@ -1064,26 +1293,16 @@ class App(ctk.CTk):
                     text_color=GREEN
                 )
 
-    def _finish_session_ui(self):
-        if self._closing:
-            return
-        self._session_active = False
-        self._preview_paused = False
-        self._idle_timer.touch()
-        self._set_ui_enabled(True)
-        self._start_live_cam()  # Restart live cam
-        if self.status_label.cget("text_color") == ORANGE:
-            self.status_label.configure(text="✅ Siap", text_color=GREEN)
-
     def _set_ui_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
-
         if hasattr(self, "camera_combo"):
-            self.camera_combo.configure(
-                state="readonly" if enabled else "disabled"
-            )
-
-        # Template grid versi lama mungkin tidak dibuat.
+            self.camera_combo.configure(state="readonly" if enabled else "disabled")
+        if hasattr(self, "timer_entry"):
+            self.timer_entry.configure(state=state)
+        if hasattr(self, "start_session_button"):
+            self.start_session_button.configure(state="normal" if enabled else "disabled")
+        if hasattr(self, "cancel_session_button"):
+            self.cancel_session_button.configure(state="disabled" if enabled else "normal")
         if hasattr(self, "scroll_frame"):
             for widget in self.scroll_frame.winfo_children():
                 if isinstance(widget, TemplateCard):
@@ -1094,9 +1313,7 @@ class App(ctk.CTk):
             return
 
         self._closing = True
-
-        if hasattr(self, "_session_cancel"):
-            self._session_cancel.set()
+        self._session_cancel.set()
 
         if hasattr(self, "_idle_timer"):
             try:
@@ -1104,10 +1321,7 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-        if (
-            hasattr(self, "_ui_after")
-            and self._ui_after is not None
-        ):
+        if getattr(self, "_ui_after", None) is not None:
             try:
                 self.after_cancel(self._ui_after)
             except Exception:
