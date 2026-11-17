@@ -1090,11 +1090,35 @@ class App(ctk.CTk):
                     widget.btn.configure(state=state)
 
     def on_closing(self):
+        if getattr(self, "_closing", False):
+            return
+
         self._closing = True
-        self._session_cancel.set()
-        self._idle_timer.cancel()
-        self.after_cancel(self._ui_after)
-        self.live_cam.stop()
+
+        if hasattr(self, "_session_cancel"):
+            self._session_cancel.set()
+
+        if hasattr(self, "_idle_timer"):
+            try:
+                self._idle_timer.cancel()
+            except Exception:
+                pass
+
+        if (
+            hasattr(self, "_ui_after")
+            and self._ui_after is not None
+        ):
+            try:
+                self.after_cancel(self._ui_after)
+            except Exception:
+                pass
+
+        if hasattr(self, "live_cam"):
+            try:
+                self.live_cam.stop()
+            except Exception:
+                pass
+
         self.destroy()
 
     def report_callback_exception(self, exc_type, exc_value, traceback):
