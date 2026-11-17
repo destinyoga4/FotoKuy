@@ -24,7 +24,7 @@ class HomePage(ctk.CTkFrame):
 
         desc = ctk.CTkLabel(
             self,
-            text="Raka Cimahi blablabla wekwek.",
+            text="Software Photobooth terseru sedunia.",
             font=("Arial", 16)
         )
 
@@ -32,7 +32,7 @@ class HomePage(ctk.CTkFrame):
 
         question = ctk.CTkLabel(
             self,
-            text="Apakah anda ingin foto sendiri atau dengan teman?",
+            text="Apakah anda ingin foto sendiri atau bersama teman?",
             font=("Arial", 18)
         )
 
@@ -61,7 +61,7 @@ class HomePage(ctk.CTkFrame):
 
         mabar_btn = ctk.CTkButton(
             button_frame,
-            text="MABAR\n\nCOMING SOON",
+            text="TOGETHER\n\nCOMING SOON",
             width=250,
             height=180,
             font=("Arial", 24)
