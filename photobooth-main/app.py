@@ -392,8 +392,18 @@ class App(ctk.CTk):
     def _handle_escape(self, event=None):
         if self._session_active:
             self._cancel_current_session()
-        else:
-            self.attributes("-fullscreen", False)
+            return
+
+        # Pada layar persiapan foto, ESC berfungsi sebagai tombol Kembali.
+        back_button = getattr(self, "back_button", None)
+        try:
+            if back_button is not None and back_button.winfo_exists():
+                self.back_to_template_preview()
+                return
+        except tk.TclError:
+            pass
+
+        self.attributes("-fullscreen", False)
 
     def _cancel_current_session(self):
         if not self._session_active or self._closing:
@@ -449,6 +459,45 @@ class App(ctk.CTk):
         if hasattr(self, "timer_entry"):
             self.timer_entry.focus_set()
             self.timer_entry.select_range(0, "end")
+
+    def back_to_template_preview(self):
+        """Kembali dari layar persiapan foto ke preview template terpilih."""
+        if self._closing:
+            return
+
+        if self._session_active:
+            messagebox.showwarning(
+                "Sesi Masih Berjalan",
+                "Batalkan atau selesaikan sesi foto terlebih dahulu.",
+            )
+            return
+
+        selected_template = self._selected_template
+
+        # Hentikan kamera sebelum widget layar foto dihancurkan.
+        live_cam = getattr(self, "live_cam", None)
+        if live_cam is not None:
+            try:
+                live_cam.stop()
+            except Exception:
+                logging.exception("Gagal menghentikan kamera saat kembali")
+
+        # Root memakai grid pada layar foto. Hapus semua widget grid terlebih dahulu
+        # sebelum kembali memakai pack untuk page_container.
+        for widget in list(self.winfo_children()):
+            try:
+                widget.destroy()
+            except tk.TclError:
+                pass
+
+        self.current_page = None
+        self.page_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.page_container.pack(fill="both", expand=True)
+
+        if selected_template is not None:
+            self.show_template_preview_page(selected_template)
+        else:
+            self.show_template_page()
 
     def _prepare_photo_interface(self):
         self.configure(fg_color=BG_DARK)
@@ -578,14 +627,40 @@ class App(ctk.CTk):
     # ── Layout builders ─────────────────────────────────────────
 
     def _build_header(self):
-        header = ctk.CTkFrame(self, fg_color=BG_MID, corner_radius=0, height=78, border_width=0)
+        header = ctk.CTkFrame(
+            self,
+            fg_color=BG_MID,
+            corner_radius=0,
+            height=78,
+            border_width=0,
+        )
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.grid_propagate(False)
         header.grid_columnconfigure(1, weight=1)
 
+        self.back_button = ctk.CTkButton(
+            header,
+            text="←  Kembali",
+            command=self.back_to_template_preview,
+            width=110,
+            height=36,
+            corner_radius=10,
+            fg_color=BG_SURFACE,
+            hover_color=BORDER,
+            text_color=FG_TEXT,
+            font=("Segoe UI", 11, "bold"),
+        )
+        self.back_button.grid(
+            row=0,
+            column=0,
+            padx=(18, 8),
+            pady=12,
+            sticky="w",
+        )
+
         # Logo/Title
         brand = ctk.CTkFrame(header, fg_color="transparent")
-        brand.grid(row=0, column=0, padx=24, pady=12, sticky="w")
+        brand.grid(row=0, column=1, padx=(8, 24), pady=8, sticky="w")
         ctk.CTkLabel(
             brand,
             text="PHOTO BOOTH",
@@ -607,14 +682,18 @@ class App(ctk.CTk):
 
         # Camera selector
         cam_frame = ctk.CTkFrame(header, fg_color="transparent")
-        cam_frame.grid(row=0, column=1, padx=20, sticky="e")
-
+        cam_frame.grid(row=0, column=2, padx=16, sticky="e")
         ctk.CTkLabel(
-            cam_frame, text="Kamera:", font=("Segoe UI", 12), text_color=FG_MUTED
+            cam_frame,
+            text="Kamera:",
+            font=("Segoe UI", 12),
+            text_color=FG_MUTED,
         ).pack(side="left", padx=(0, 8))
 
         self.cameras = list_available_cameras()
-        self.camera_var = ctk.StringVar(value=self.cameras[0] if self.cameras else "Camera 0")
+        self.camera_var = ctk.StringVar(
+            value=self.cameras[0] if self.cameras else "Camera 0"
+        )
         self.camera_combo = ctk.CTkComboBox(
             cam_frame,
             values=self.cameras,
@@ -632,13 +711,12 @@ class App(ctk.CTk):
         )
         self.camera_combo.pack(side="left")
 
-        # ESC hint
         ctk.CTkLabel(
             header,
-            text="ESC = keluar fullscreen  •  F11 = fullscreen",
+            text="ESC = kembali  •  F11 = fullscreen",
             font=("Segoe UI", 10),
             text_color=FG_MUTED,
-        ).grid(row=0, column=2, padx=20)
+        ).grid(row=0, column=3, padx=(4, 18))
 
     def _build_main(self):
         # Scrollable template grid
@@ -1303,6 +1381,12 @@ class App(ctk.CTk):
             self.start_session_button.configure(state="normal" if enabled else "disabled")
         if hasattr(self, "cancel_session_button"):
             self.cancel_session_button.configure(state="disabled" if enabled else "normal")
+        if hasattr(self, "back_button"):
+            try:
+                if self.back_button.winfo_exists():
+                    self.back_button.configure(state="normal" if enabled else "disabled")
+            except tk.TclError:
+                pass
         if hasattr(self, "scroll_frame"):
             for widget in self.scroll_frame.winfo_children():
                 if isinstance(widget, TemplateCard):

@@ -216,7 +216,12 @@ class PhotoBoothEngine:
         finally:
             if cap is not None:
                 cap.release()
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                logging.warning(
+                    "cv2.destroyAllWindows tidak tersedia; proses tetap dilanjutkan."
+                )
 
     def _capture(self, cap, photo_index=None):
         width, height = configure_camera(cap)

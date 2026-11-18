@@ -1,18 +1,19 @@
 import os
 import cv2
 import numpy as np
+from pathlib import Path
 
 
 class AIUpscaler:
-    """Wrapper AI Super-Resolution (FSRCNN .pb) untuk skala 1x, 2x, dan 3x."""
-
-    _model_cache = {}
+    """Wrapper AI Super-Resolution (FSRCNN .pb) untuk skala 1x, 2x, dan 3x."""    
 
     def __init__(self, models_dir=None):
+        base_dir = Path(__file__).resolve().parent
         if models_dir is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            models_dir = os.path.join(base_dir, "models")
-        self.models_dir = models_dir
+            self.models_dir = base_dir / "models"
+        else:
+            self.models_dir = Path(models_dir).resolve()
+        self._model_cache = {}
 
     def _resolve_model_path(self, scale: int) -> str:
         for filename in (f"FSRCNN_x{scale}.pb", f"fsrcnn_x{scale}.pb"):
@@ -38,6 +39,14 @@ class AIUpscaler:
 
         model_path = self._resolve_model_path(scale)
         sr = cv2.dnn_superres.DnnSuperResImpl_create()
+
+        print("MODEL PATH:", model_path)
+        print("MODEL EXISTS:", os.path.isfile(model_path))
+        print(
+            "MODEL SIZE:",
+            os.path.getsize(model_path) if os.path.isfile(model_path) else 0
+        )
+
         sr.readModel(model_path)
         sr.setModel("fsrcnn", scale)
         self._model_cache[scale] = sr
