@@ -105,8 +105,9 @@ class PreviewWindow:
 
         preview_frame = tk.Frame(content, bg=BG)
         preview_frame.pack(fill="both", expand=True, padx=24, pady=(12, 4))
-        panel_side = "top" if self._compact_layout else "left"
-        panel_pad = {"pady": (0, 8)} if self._compact_layout else {"padx": (0, 8)}
+        preview_frame.pack_propagate(False)
+        panel_side = "left"
+        panel_pad = {"padx": (0, 12)}
 
         photo_panel = tk.Frame(preview_frame, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
         photo_panel.pack(side=panel_side, anchor="n", **panel_pad)

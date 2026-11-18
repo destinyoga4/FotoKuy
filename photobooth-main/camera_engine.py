@@ -109,6 +109,43 @@ def list_available_cameras(max_tests=5):
     return available_cameras
 
 
+# Resolusi diminta dari tertinggi ke terendah, dibatasi maksimal 1080p.
+CANDIDATE_RESOLUTIONS = [(1920, 1080), (1280, 720), (640, 480)]
+
+
+def _read_int_prop(cap, prop):
+    """Baca properti kamera sebagai bilangan bulat; 0 bila tidak valid."""
+    try:
+        return int(cap.get(prop))
+    except (TypeError, ValueError):
+        return 0
+
+
+def configure_camera(cap, candidates=CANDIDATE_RESOLUTIONS):
+    """Atur resolusi kamera dan kembalikan (lebar, tinggi) yang benar-benar dipakai.
+
+    MJPG diminta lebih dulu karena banyak webcam hanya menyediakan 1080p
+    dalam format ini. Resolusi dicoba dari tertinggi ke terendah; yang dipakai
+    adalah yang pertama diterima driver dan menghasilkan frame valid.
+    """
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    for w, h in candidates:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        actual = (
+            _read_int_prop(cap, cv2.CAP_PROP_FRAME_WIDTH),
+            _read_int_prop(cap, cv2.CAP_PROP_FRAME_HEIGHT),
+        )
+        if actual == (w, h):
+            ok, frame = cap.read()
+            if ok and frame is not None and frame.size > 0:
+                return w, h
+    return (
+        _read_int_prop(cap, cv2.CAP_PROP_FRAME_WIDTH),
+        _read_int_prop(cap, cv2.CAP_PROP_FRAME_HEIGHT),
+    )
+
+
 def _beep(freq=880, duration_ms=120):
     """Beep via winsound jika tersedia, jika tidak silent."""
     if HAS_WINSOUND:
@@ -119,7 +156,14 @@ def _beep(freq=880, duration_ms=120):
 
 
 class PhotoBoothEngine:
-    def __init__(self, config, camera_index=0, output_filename=None, cancel_event=None):
+    def __init__(
+        self,
+        config,
+        camera_index=0,
+        output_filename=None,
+        cancel_event=None,
+        timer_seconds=6,
+    ):
         self.config = config
         self.camera_index = camera_index
         self.output_filename = output_filename or create_output_path()
@@ -128,11 +172,20 @@ class PhotoBoothEngine:
         self.photo_boxes = []
         self.motion_clips = []
         self.cancel_event = cancel_event or threading.Event()
+
+        # Timer selalu berupa integer aman dalam rentang 2-10 detik.
+        try:
+            timer_seconds = int(timer_seconds)
+        except (TypeError, ValueError):
+            timer_seconds = 6
+        self.timer_seconds = max(2, min(10, timer_seconds))
+
         self.meme_manager = MemeManager()
         self.upload_manager = UploadManager()
 
-        # Filter state
+        # Filter & upscale state
         self.filter_idx = 0  # FILTER_NORMAL
+        self.output_scale = 1
 
         # Ref variables (computed in capture)
         self._x1 = self._y1 = self._x2 = self._y2 = 0
@@ -163,11 +216,16 @@ class PhotoBoothEngine:
         finally:
             if cap is not None:
                 cap.release()
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                logging.warning(
+                    "cv2.destroyAllWindows tidak tersedia; proses tetap dilanjutkan."
+                )
 
     def _capture(self, cap, photo_index=None):
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        width, height = configure_camera(cap)
+        logging.info("Resolusi kamera yang dipakai: %sx%s", width, height)
 
         photo_count = self.config["photo_count"] if photo_index is None else 1
 
@@ -238,8 +296,9 @@ class PhotoBoothEngine:
 
         for i in range(photo_count):
             # Countdown
-            delay = 6
+            delay = self.timer_seconds
             start_time = time.monotonic()
+            last_beep_second = None
             pre_roll = deque(maxlen=PRE_ROLL_FRAMES)
             frame_number = 0
             while time.monotonic() - start_time < delay:
@@ -284,8 +343,9 @@ class PhotoBoothEngine:
                 if cv2.waitKey(1) & 0xFF == 27:
                     return False
 
-                # Beep on last 3 ticks (once per second)
-                if elapsed < 0.05 or (elapsed > 1.0 and elapsed < 1.05) or (elapsed > 2.0 and elapsed < 2.05):
+                # Beep tepat satu kali saat countdown menunjukkan 3, 2, dan 1.
+                if 1 <= remaining_int <= 3 and remaining_int != last_beep_second:
+                    last_beep_second = remaining_int
                     threading.Thread(target=_beep, daemon=True).start()
 
             # Ambil frame
@@ -330,7 +390,28 @@ class PhotoBoothEngine:
             self.photos[photo_index] = captured_photos[0]
             self.photo_boxes[photo_index] = captured_boxes[0]
             self.motion_clips[photo_index] = captured_motion[0]
+
+        self.save_raw_photos(suffix="raw")
         return True
+
+    def save_raw_photos(self, suffix="raw"):
+        """Simpan foto mentah (tanpa template) ke folder riwayat/raw/."""
+        if not self.photos:
+            return []
+
+        raw_dir = os.path.join(os.path.dirname(os.path.abspath(self.output_filename)), "raw")
+        os.makedirs(raw_dir, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(self.output_filename))[0]
+
+        saved_paths = []
+        for idx, frame in enumerate(self.photos, start=1):
+            filename = f"{base_name}_{suffix}_{idx}.jpg"
+            filepath = os.path.join(raw_dir, filename)
+            cv2.imwrite(filepath, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            saved_paths.append(filepath)
+
+        logging.info("Foto %s disimpan (%d file) di: %s", suffix, len(saved_paths), raw_dir)
+        return saved_paths
 
     def _collect_motion_frames(self, pre_roll, shutter_frame):
         """Gabungkan gerakan sebelum jepretan dengan foto hasil jepretan."""
@@ -377,26 +458,29 @@ class PhotoBoothEngine:
         canvas_w = self.config["width"]
         canvas_h = self.config["height"]
         layout = self.config["layout"]
+        output_scale = max(1, int(getattr(self, "output_scale", 1)))
+        target_w = round(canvas_w * output_scale)
+        target_h = round(canvas_h * output_scale)
 
         pil_photos = []
         for i in range(min(len(self.photos), len(layout))):
             pil_photos.append(self.get_photo_preview(i))
 
-        # Overlay
+        # Overlay disesuaikan dengan skala kanvas target (1x / 2x / 3x)
         overlay = None
         overlay_path = self.config.get("overlay_full_path")
         if overlay_path and os.path.exists(overlay_path):
             with Image.open(overlay_path) as source:
                 overlay = source.convert("RGBA")
-            if overlay.size != (canvas_w, canvas_h):
-                overlay = overlay.resize((canvas_w, canvas_h), Image.LANCZOS)
+            if overlay.size != (target_w, target_h):
+                overlay = overlay.resize((target_w, target_h), Image.LANCZOS)
 
-        # Save JPG
+        # Save JPG (menggunakan output_scale penuh)
         final_image = self._compose_photos(pil_photos, overlay)
         final_image.save(self.output_filename, quality=95, subsampling=0)
-        print(f"Komposit disimpan: {self.output_filename}")
+        print(f"Komposit disimpan ({final_image.width}x{final_image.height}): {self.output_filename}")
 
-        # Save GIF/Boomerang
+        # Save GIF/Boomerang (tetap pada ukuran ringkas 480x720)
         gif_path = None
         if pil_photos:
             gif_path = self._save_motion_gif(overlay) or self._save_gif(pil_photos, overlay=overlay)
@@ -470,7 +554,10 @@ class PhotoBoothEngine:
     def _compose_photos(self, photos, overlay=None, max_size=None):
         """Susun foto pada slot template, lalu pasang overlay di atasnya."""
         canvas_w, canvas_h = self.config["width"], self.config["height"]
-        scale = min(1, max_size[0] / canvas_w, max_size[1] / canvas_h) if max_size else 1
+        if max_size:
+            scale = min(1, max_size[0] / canvas_w, max_size[1] / canvas_h)
+        else:
+            scale = max(1, int(getattr(self, "output_scale", 1)))
         size = (max(1, round(canvas_w * scale)), max(1, round(canvas_h * scale)))
         image = Image.new("RGB", size, "white")
         sx, sy = size[0] / canvas_w, size[1] / canvas_h

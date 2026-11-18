@@ -1,52 +1,193 @@
 import os
+import uuid
+import mimetypes
 import requests
 import qrcode
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
+from dotenv import load_dotenv
 import threading
 import time
 import zipfile
 import math
 
+# Membaca konfigurasi dari file .env
+load_dotenv()
+
 
 class UploadManager:
-    UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
-    MAX_RETRIES = 2
+    MAX_RETRIES = 1
 
     def __init__(self):
-        pass
+        self.supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        self.supabase_key = os.getenv("SUPABASE_KEY", "")
+        self.supabase_bucket = os.getenv("SUPABASE_BUCKET", "")
+
+        self._validate_config()
+
+    def _validate_config(self):
+        """Periksa apakah konfigurasi Supabase berhasil dibaca."""
+        missing = []
+
+        if not self.supabase_url:
+            missing.append("SUPABASE_URL")
+
+        if not self.supabase_key:
+            missing.append("SUPABASE_KEY")
+
+        if not self.supabase_bucket:
+            missing.append("SUPABASE_BUCKET")
+
+        if missing:
+            raise RuntimeError(
+                "Konfigurasi Supabase belum lengkap: "
+                + ", ".join(missing)
+                + ". Periksa file .env."
+            )
+
+        if not self.supabase_url.startswith("https://"):
+            raise RuntimeError(
+                "SUPABASE_URL tidak valid. "
+                "Formatnya harus https://PROJECT_ID.supabase.co"
+            )
+
+        print("[Supabase] Konfigurasi berhasil dibaca.")
+        print(f"[Supabase] URL: {self.supabase_url}")
+        print(f"[Supabase] Bucket: {self.supabase_bucket}")
+        print("[Supabase] Key: berhasil dibaca")
 
     # ─────────────────────────────────────────────────────────────
     # UPLOAD
     # ─────────────────────────────────────────────────────────────
 
     def upload_file(self, filepath):
-        """Upload ke tmpfiles.org dengan 1x retry. Return download URL atau None."""
+        """
+        Upload file ke Supabase Storage.
+
+        Mendukung gambar, GIF, dan ZIP.
+        Return URL publik jika berhasil atau None jika gagal.
+        """
+        if not os.path.isfile(filepath):
+            print(f"Upload gagal: file tidak ditemukan: {filepath}")
+            return None
+
+        original_filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath)
+
+        # Ambil ekstensi file, misalnya .jpg, .gif, atau .zip
+        extension = os.path.splitext(original_filename)[1].lower()
+
+        # Nama acak agar file tidak menimpa file sebelumnya
+        remote_filename = f"{uuid.uuid4().hex}{extension}"
+
+        # Deteksi Content-Type secara otomatis
+        content_type, _ = mimetypes.guess_type(filepath)
+
+        if content_type is None:
+            content_type = "application/octet-stream"
+
+        # Endpoint upload Supabase Storage
+        upload_url = (
+            f"{self.supabase_url}/storage/v1/object/"
+            f"{self.supabase_bucket}/{remote_filename}"
+        )
+
+        headers = {
+            "apikey": self.supabase_key,
+            "Authorization": f"Bearer {self.supabase_key}",
+            "Content-Type": content_type,
+            "x-upsert": "false",
+        }
+
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
-                filename = os.path.basename(filepath)
-                file_size = os.path.getsize(filepath)
-                print(f"[Upload Attempt {attempt}] {filename} ({file_size // 1024} KB)...")
+                print(
+                    f"[Upload Attempt {attempt}] "
+                    f"{original_filename} ({file_size // 1024} KB)"
+                )
 
-                with open(filepath, "rb") as f:
+                print(f"[Supabase] Endpoint: {upload_url}")
+                print(f"[Supabase] Content-Type: {content_type}")
+                print("[Supabase] Mulai mengirim file...")
+
+                with open(filepath, "rb") as file:
                     response = requests.post(
-                        self.UPLOAD_URL,
-                        files={"file": (filename, f)},
-                        timeout=60,
+                        upload_url,
+                        headers=headers,
+                        data=file,
+                        timeout=(5, 20),
                     )
 
-                if response.status_code == 200:
-                    data = response.json()
-                    # Gunakan halaman resmi dari API. Link download di halaman
-                    # tersebut memakai token sementara; jangan merakit /dl/ sendiri.
-                    download_url = data["data"]["url"]
-                    print(f"Upload Berhasil! Link: {download_url}")
-                    return download_url
-                else:
-                    print(f"Upload gagal (HTTP {response.status_code}): {response.text[:120]}")
-            except Exception as e:
-                print(f"Upload error (attempt {attempt}): {e}")
+                print(f"[Supabase] Respons diterima: HTTP {response.status_code}")
+
+                if response.status_code in (200, 201):
+                    public_url = (
+                        f"{self.supabase_url}/storage/v1/object/public/"
+                        f"{self.supabase_bucket}/{remote_filename}"
+                    )
+
+                    print("Upload ke Supabase berhasil!")
+                    print(f"Link publik: {public_url}")
+
+                    return public_url
+
+                print(
+                    f"Upload gagal (HTTP {response.status_code}): "
+                    f"{response.text[:500]}"
+                )
+
+                # Error konfigurasi tidak perlu dicoba berulang
+                if response.status_code == 400:
+                    print(
+                        "Periksa format file dan pengaturan bucket."
+                    )
+                    return None
+
+                if response.status_code == 401:
+                    print(
+                        "Key Supabase tidak valid. "
+                        "Periksa SUPABASE_KEY di .env."
+                    )
+                    return None
+
+                if response.status_code == 403:
+                    print(
+                        "Akses ditolak. Periksa key dan izin Storage."
+                    )
+                    return None
+
+                if response.status_code == 404:
+                    print(
+                        "Project atau bucket tidak ditemukan. "
+                        "Periksa SUPABASE_URL dan SUPABASE_BUCKET."
+                    )
+                    return None
+
+                if response.status_code == 413:
+                    print(
+                        "Ukuran file melebihi batas bucket."
+                    )
+                    return None
+
+            except requests.Timeout:
+                print(
+                    f"Upload timeout pada percobaan {attempt}."
+                )
+
+            except requests.ConnectionError as error:
+                print(
+                    f"Tidak dapat terhubung ke Supabase: {error}"
+                )
+
+            except requests.RequestException as error:
+                print(
+                    f"Request upload gagal: {error}"
+                )
+
+            except OSError as error:
+                print(f"File tidak dapat dibaca: {error}")
+                return None
 
             if attempt < self.MAX_RETRIES:
                 print("Mencoba ulang dalam 2 detik...")
@@ -111,7 +252,7 @@ class UploadManager:
 
         tk.Label(
             root,
-            text="Link aktif ±1 jam via tmpfiles.org",
+            text="Foto tersimpan di Supabase Storage",
             font=("Segoe UI", 10),
             bg="#0f3460",
             fg="#a8a8b3",
