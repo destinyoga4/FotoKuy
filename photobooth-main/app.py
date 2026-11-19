@@ -13,6 +13,7 @@ from PIL import Image, ImageTk
 
 from camera_engine import PhotoBoothEngine, list_available_cameras, get_group_guide_box
 from preview_window import PreviewWindow
+from print_manager import PrintDialog
 from upscale_window import UpscaleWindow
 from upscale_engine import AIUpscaler
 from filter_engine import apply_filter, get_filter_name, FILTER_COUNT
@@ -1133,7 +1134,7 @@ class App(ctk.CTk):
             self._run_on_ui(
                 messagebox.showerror,
                 "Sesi Foto Gagal",
-                f"Sesi tidak dapat diselesaikan:\n{e}\n\nSilakan coba lagi.",
+                f"Sesi tidak dapat diselesaikan:\n{e}\n\nSil    akan coba lagi.",
             )
             self._finish_session()
 
@@ -1285,6 +1286,26 @@ class App(ctk.CTk):
             )
             self._finish_session()
 
+        def do_print(photo_path, parent_window):
+            def on_print_status(text, color):
+                if hasattr(self, "status_label"):
+                    try:
+                        if self.status_label.winfo_exists():
+                            self.status_label.configure(text=text, text_color=color)
+                    except tk.TclError:
+                        pass
+
+            def on_print_close():
+                if getattr(preview, "_idle_timer", None) is not None:
+                    preview._idle_timer.touch()
+
+            PrintDialog(
+                parent_window,
+                photo_path,
+                on_status=on_print_status,
+                on_close=on_print_close,
+            )
+
         preview = PreviewWindow(
             composite_path,
             do_upload,
@@ -1294,6 +1315,7 @@ class App(ctk.CTk):
             bundle_callback=lambda: do_upload(composite_path, include_gif=True),
             photo_previews=[engine.get_photo_preview(i) for i in range(len(engine.photos))],
             retake_one_callback=do_retake_one,
+            print_callback=do_print,
         )
         preview.show(wait=False)
 

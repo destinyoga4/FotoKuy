@@ -16,10 +16,11 @@ MUTED = "#91a2bb"
 ACCENT = "#f0627b"
 GREEN = "#34d3ad"
 ORANGE = "#f6b756"
+BLUE = "#60a5fa"
 
 
 class PreviewWindow:
-    """Window preview hasil sesi dengan aksi upload, retake, dan simpan."""
+    """Window preview hasil sesi dengan aksi upload, cetak, retake, dan simpan."""
 
     def __init__(
         self,
@@ -31,6 +32,7 @@ class PreviewWindow:
         bundle_callback=None,
         photo_previews=None,
         retake_one_callback=None,
+        print_callback=None,
     ):
         self.composite_path = composite_path
         self.gif_path = gif_path
@@ -40,6 +42,7 @@ class PreviewWindow:
         self.bundle_callback = bundle_callback
         self.photo_previews = photo_previews or []
         self.retake_one_callback = retake_one_callback
+        self.print_callback = print_callback
         self._retake_images = []
         self.result = None
         self.gif_frames = []
@@ -135,21 +138,24 @@ class PreviewWindow:
             "highlightbackground": BG, "highlightcolor": ACCENT,
         }
 
-        if self.bundle_callback and self.gif_path and os.path.exists(self.gif_path):
-            bundle = tk.Button(btn_frame, text="📦  Download Foto + GIF (1 QR)",
-                               bg=GREEN, fg=BG, activebackground="#57e0bd", activeforeground=BG,
-                               command=self._on_upload_bundle, **btn_style)
-            bundle.grid(row=0, column=0, columnspan=4, padx=4, pady=(0, 8), sticky="ew")
-
         actions = [
             ("📸  Download Foto", SURFACE, GREEN, self._on_upload_photo),
         ]
         if self.gif_path and os.path.exists(self.gif_path):
             actions.append(("🎞  Download GIF", SURFACE, ORANGE, self._on_upload_gif))
+        if self.print_callback:
+            actions.append(("🖨  Print Foto", SURFACE, BLUE, self._on_print))
         actions.extend([
             ("🔄  Ulang Semua", SURFACE, ORANGE, self._on_retake),
             ("✓  Selesai", SURFACE, MUTED, self._on_save),
         ])
+
+        if self.bundle_callback and self.gif_path and os.path.exists(self.gif_path):
+            bundle = tk.Button(btn_frame, text="📦  Download Foto + GIF (1 QR)",
+                               bg=GREEN, fg=BG, activebackground="#57e0bd", activeforeground=BG,
+                               command=self._on_upload_bundle, **btn_style)
+            bundle.grid(row=0, column=0, columnspan=len(actions), padx=4, pady=(0, 8), sticky="ew")
+
         for column, (label, bg, fg, callback) in enumerate(actions):
             button = tk.Button(btn_frame, text=label, bg=bg, fg=fg,
                                activebackground=fg, activeforeground=BG,
@@ -166,7 +172,7 @@ class PreviewWindow:
             bundle.bind("<space>", lambda _event: bundle.invoke())
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_save)
-        self._idle_timer = IdleTimer(self.root, 120, self._on_save)
+        self._idle_timer = IdleTimer(self.root, 120, self._on_idle_timeout)
         if self._focus_widgets:
             self._focus_widgets[0].focus_set()
         if wait:
@@ -305,6 +311,29 @@ class PreviewWindow:
         self.result = "retake_one"
         self._close()
         self.retake_one_callback(photo_index)
+
+    def _on_idle_timeout(self):
+        if self._closed:
+            return
+        try:
+            has_child_dialog = any(
+                isinstance(child, tk.Toplevel) and child.winfo_exists()
+                for child in self.root.winfo_children()
+            )
+        except tk.TclError:
+            has_child_dialog = False
+        if has_child_dialog:
+            if self._idle_timer is not None:
+                self._idle_timer.touch()
+            return
+        self._on_save()
+
+    def _on_print(self):
+        if self._closed or not self.print_callback:
+            return
+        if self._idle_timer is not None:
+            self._idle_timer.touch()
+        self.print_callback(self.composite_path, self.root)
 
     def _on_save(self):
         if self._closed:
