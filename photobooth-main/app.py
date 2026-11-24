@@ -135,54 +135,129 @@ class LiveCamSidebar(ctk.CTkFrame):
     PREVIEW_W = 240
     PREVIEW_H = 180
 
-    def __init__(self, master, **kwargs):
-        super().__init__(master, fg_color=BG_CARD, corner_radius=CORNER_RADIUS, border_width=1, border_color=BORDER, **kwargs)
+    def __init__(
+        self,
+        master,
+        preview_width=640,
+        preview_height=480,
+        show_filter_button=True,
+        fill_parent=False,
+        **kwargs
+    ):
+        super().__init__(
+            master,
+            fg_color="#070b13" if fill_parent else BG_CARD,
+            corner_radius=0 if fill_parent else CORNER_RADIUS,
+            border_width=0 if fill_parent else 1,
+            border_color=BORDER,
+            **kwargs
+        )
+
+        # Ukuran preview dinamis.
+        self.preview_width = preview_width
+        self.preview_height = preview_height
+        self.show_filter_button = show_filter_button
+        self.fill_parent = fill_parent
+
+        # State kamera dan thread.
         self._stop_event = threading.Event()
         self._thread = None
         self._frame_queue = queue.Queue(maxsize=1)
-        self._camera_status = "📷 Live Preview"
+        self._camera_status = "Menunggu kamera..."
         self._displayed_status = None
         self._start_after = None
+        self._poll_after = None
         self._destroyed = False
         self.current_filter = 0
 
+        # Status kamera.
         self._status_label = ctk.CTkLabel(
-            self, text="📷 Live Preview", font=("Segoe UI", 13, "bold"), text_color=GREEN
+            self,
+            text="Menunggu kamera...",
+            font=("Segoe UI", 13, "bold"),
+            text_color=ORANGE
         )
-        self._status_label.pack(pady=(12, 4))
+        if not self.fill_parent:
+            self._status_label.pack(
+                pady=(12, 4)
+            )
 
+        # Canvas untuk menampilkan frame OpenCV.
         self.canvas = tk.Canvas(
             self,
-            width=self.PREVIEW_W,
-            height=self.PREVIEW_H,
             bg="#070b13",
             highlightthickness=0,
             bd=0,
-            relief="flat",
+            relief="flat"
         )
-        self.canvas.pack(padx=12, pady=4)
 
+        if self.fill_parent:
+            self.canvas.pack(
+                fill="both",
+                expand=True
+            )
+        else:
+            self.canvas.configure(
+                width=self.preview_width,
+                height=self.preview_height
+            )
+
+            self.canvas.pack(
+                padx=12,
+                pady=4
+            )
+
+        self.canvas.bind(
+            "<Configure>",
+            self._on_canvas_resize
+        )
+        self.canvas.pack(
+            padx=12,
+            pady=4
+        )
+
+        # Nama filter aktif.
         self._filter_label = ctk.CTkLabel(
             self,
-            text=f"Filter aktif  •  {get_filter_name(self.current_filter)}",
+            text=(
+                "Filter aktif  •  "
+                f"{get_filter_name(self.current_filter)}"
+            ),
             font=("Segoe UI", 10),
             text_color=FG_MUTED,
-            anchor="w",
+            anchor="w"
         )
-        self._filter_label.pack(pady=2)
+        self._filter_label.pack(
+            pady=2
+        )
 
-        ctk.CTkButton(
-            self,
-            text="🔄 Ganti Filter",
-            command=self._next_filter,
-            fg_color=BG_SURFACE,
-            hover_color="#2b4163",
-            font=("Segoe UI", 11, "bold"),
-            width=176,
-            height=CONTROL_HEIGHT,
-            corner_radius=10,
-        ).pack(pady=(4, 12))
-        self._poll_after = self.after(35, self._poll_frame)
+        if self.show_filter_button:
+            self.filter_button = ctk.CTkButton(
+                self,
+                text="🔄 Ganti Filter",
+                command=self._next_filter,
+                fg_color=BG_SURFACE,
+                hover_color="#2b4163",
+                font=("Segoe UI", 11, "bold"),
+                width=176,
+                height=CONTROL_HEIGHT,
+                corner_radius=10
+            )
+            self.filter_button.pack(
+                pady=(4, 12)
+            )
+        else:
+            ctk.CTkLabel(
+                self,
+                text="",
+            )
+
+        # Mulai polling frame dari antrean kamera ke canvas.
+        self._poll_after = self.after(
+            35,
+            self._poll_frame
+        )
+        
 
     def start(self, cam_index=0):
         if self._destroyed:
@@ -227,50 +302,209 @@ class LiveCamSidebar(ctk.CTkFrame):
         self.current_filter = (self.current_filter + 1) % FILTER_COUNT
         self._filter_label.configure(text=f"Filter aktif  •  {get_filter_name(self.current_filter)}")
 
+    def _on_canvas_resize(self, event):
+        if event.width <= 1 or event.height <= 1:
+            return
+
+        self.preview_width = event.width
+        self.preview_height = event.height
+
+    def _resize_frame_to_fill(self, pil_image):
+        canvas_width = max(
+            self.canvas.winfo_width(),
+            2
+        )
+        canvas_height = max(
+            self.canvas.winfo_height(),
+            2
+        )
+
+        image_width, image_height = pil_image.size
+
+        image_ratio = image_width / image_height
+        canvas_ratio = canvas_width / canvas_height
+
+        if image_ratio > canvas_ratio:
+            new_width = int(
+                image_height * canvas_ratio
+            )
+
+            left = (
+                image_width - new_width
+            ) // 2
+
+            pil_image = pil_image.crop(
+                (
+                    left,
+                    0,
+                    left + new_width,
+                    image_height
+                )
+            )
+        else:
+            new_height = int(
+                image_width / canvas_ratio
+            )
+
+            top = (
+                image_height - new_height
+            ) // 2
+
+            pil_image = pil_image.crop(
+                (
+                    0,
+                    top,
+                    image_width,
+                    top + new_height
+                )
+            )
+
+        return pil_image.resize(
+            (
+                canvas_width,
+                canvas_height
+            ),
+            Image.LANCZOS
+        )
+
     def _loop(self, cam_index, stop_event):
-        while not stop_event.is_set():
-            cap = None
-            try:
-                cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-                if not cap.isOpened():
-                    cap.release()
-                    cap = cv2.VideoCapture(cam_index)
-                failures = 0
-                while not stop_event.is_set() and cap.isOpened():
-                    ret, frame = cap.read()
-                    if stop_event.is_set():
+        cap = None
+
+        try:
+            self._camera_status = "Menghubungkan kamera..."
+
+            print(
+                f"[CAMERA] Membuka kamera index {cam_index}"
+            )
+
+            # Backend utama untuk Windows.
+            cap = cv2.VideoCapture(
+                cam_index,
+                cv2.CAP_DSHOW
+            )
+
+            # Fallback kalau DirectShow gagal.
+            if not cap.isOpened():
+                print(
+                    "[CAMERA] CAP_DSHOW gagal, "
+                    "mencoba backend default"
+                )
+
+                cap.release()
+                cap = cv2.VideoCapture(cam_index)
+
+            if not cap.isOpened():
+                self._camera_status = (
+                    "Kamera tidak dapat dibuka"
+                )
+
+                print(
+                    f"[CAMERA] Gagal membuka "
+                    f"kamera index {cam_index}"
+                )
+                return
+
+            print(
+                f"[CAMERA] Kamera {cam_index} berhasil dibuka"
+            )
+
+            # Meminta resolusi kamera yang realistis.
+            cap.set(
+                cv2.CAP_PROP_FRAME_WIDTH,
+                self.preview_width
+            )
+            cap.set(
+                cv2.CAP_PROP_FRAME_HEIGHT,
+                self.preview_height
+            )
+
+            failures = 0
+
+            while not stop_event.is_set():
+                ret, frame = cap.read()
+
+                if stop_event.is_set():
+                    break
+
+                if (
+                    not ret
+                    or frame is None
+                    or frame.size == 0
+                ):
+                    failures += 1
+
+                    print(
+                        f"[CAMERA] Frame gagal dibaca "
+                        f"({failures}/20)"
+                    )
+
+                    if failures >= 20:
+                        self._camera_status = (
+                            "Kamera tidak mengirim gambar"
+                        )
                         break
-                    if not ret or frame is None or frame.size == 0:
-                        failures += 1
-                        if failures >= 10:
-                            break
-                        stop_event.wait(0.1)
-                        continue
-                    failures = 0
-                    frame = cv2.flip(frame, 1)
-                    frame = apply_filter(frame, self.current_filter)
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil = Image.fromarray(frame_rgb)
-                    pil.thumbnail((self.PREVIEW_W, self.PREVIEW_H), Image.LANCZOS)
-                    try:
-                        if self._frame_queue.full():
-                            self._frame_queue.get_nowait()
-                        self._frame_queue.put_nowait(pil)
-                    except queue.Empty:
-                        pass
-                    except queue.Full:
-                        pass
-                    self._camera_status = "📷 Live Preview"
-                    stop_event.wait(0.035)
-            except Exception:
-                logging.exception("Live preview gagal; mencoba sambungkan ulang")
-            finally:
-                if cap is not None:
-                    cap.release()
-            if not stop_event.is_set():
-                self._camera_status = "Kamera terputus, mencoba lagi..."
-                # Batasi percobaan agar tidak membebani CPU saat kamera terputus.
-                stop_event.wait(2.0)
+
+                    stop_event.wait(0.1)
+                    continue
+
+                failures = 0
+
+                frame = cv2.flip(frame, 1)
+
+                frame = apply_filter(
+                    frame,
+                    self.current_filter
+                )
+
+                frame_rgb = cv2.cvtColor(
+                    frame,
+                    cv2.COLOR_BGR2RGB
+                )
+
+                pil_image = Image.fromarray(frame_rgb)
+
+                # Sesuaikan dengan ukuran canvas yang sebenarnya.
+                if self.fill_parent:
+                    pil_image = self._resize_frame_to_fill(
+                        pil_image
+                    )
+                else:
+                    pil_image.thumbnail(
+                        (
+                            self.preview_width,
+                            self.preview_height
+                        ),
+                        Image.LANCZOS
+                    )
+
+                try:
+                    if self._frame_queue.full():
+                        self._frame_queue.get_nowait()
+
+                    self._frame_queue.put_nowait(
+                        pil_image
+                    )
+
+                except (queue.Empty, queue.Full):
+                    pass
+
+                self._camera_status = "📷 Live Preview"
+
+                stop_event.wait(0.035)
+
+        except Exception:
+            self._camera_status = "Kamera mengalami error"
+            logging.exception(
+                "Live preview kamera gagal"
+            )
+
+        finally:
+            if cap is not None:
+                cap.release()
+
+            print(
+                f"[CAMERA] Kamera {cam_index} dilepas"
+            )
 
     def _poll_frame(self):
         self._poll_after = None
@@ -309,37 +543,53 @@ class LiveCamSidebar(ctk.CTkFrame):
                 return
 
     def _show_camera_placeholder(self, status):
-        if not self.winfo_exists():
+        if (
+            self._destroyed
+            or not self.winfo_exists()
+        ):
             return
+
         self.canvas.delete("all")
         self.canvas.image = None
-        title = "Mencari kamera" if "menghubungkan" in status.lower() or "menunggu" in status.lower() else "Kamera terputus"
+
         self.canvas.create_text(
-            self.PREVIEW_W // 2,
-            self.PREVIEW_H // 2 - 10,
-            text=f"◉\n{title}",
+            self.preview_width // 2,
+            self.preview_height // 2 - 18,
+            text="◉\n" + status,
             fill=FG_MUTED,
-            font=("Segoe UI", 13, "bold"),
-            justify="center",
+            font=("Segoe UI", 17, "bold"),
+            justify="center"
         )
+
         self.canvas.create_text(
-            self.PREVIEW_W // 2,
-            self.PREVIEW_H // 2 + 38,
-            text="Periksa koneksi kamera",
+            self.preview_width // 2,
+            self.preview_height // 2 + 55,
+            text=(
+                "Pastikan kamera tidak sedang digunakan "
+                "oleh aplikasi lain"
+            ),
             fill=FG_MUTED,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 11)
         )
 
     def _update_canvas(self, pil_img):
-        if not self.winfo_exists():
+        if (
+            self._destroyed
+            or not self.winfo_exists()
+        ):
             return
+
         tk_img = ImageTk.PhotoImage(pil_img)
+
         self.canvas.delete("all")
         self.canvas.image = tk_img
-        self.canvas.create_image(
-            self.PREVIEW_W // 2, self.PREVIEW_H // 2, image=tk_img
-        )
 
+        self.canvas.create_image(
+            self.canvas.winfo_width() // 2,
+            self.canvas.winfo_height() // 2,
+            image=tk_img,
+            anchor="center"
+        )
 
 # ══════════════════════════════════════════════════════════════════
 # Main App
@@ -503,23 +753,24 @@ class App(ctk.CTk):
     def _prepare_photo_interface(self):
         self.configure(fg_color=BG_DARK)
 
-        # Setelah sebelumnya memakai pack, sekarang root App
-        # akan memakai grid untuk layar kamera.
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=1)
         self.grid_rowconfigure(2, weight=0)
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=0)
+        self.grid_columnconfigure(
+            1,
+            weight=0,
+            minsize=370
+        )
 
-        # Header membuat camera selector.
         self._build_header()
 
-        # Area tengah sederhana selama sesi foto.
         self.capture_area = ctk.CTkFrame(
             self,
-            fg_color=BG_DARK,
-            corner_radius=0
+            fg_color="#070b13",
+            corner_radius=0,
+            border_width=0
         )
         self.capture_area.grid(
             row=1,
@@ -527,27 +778,33 @@ class App(ctk.CTk):
             sticky="nsew"
         )
 
-        self.capture_area.grid_rowconfigure(0, weight=1)
-        self.capture_area.grid_columnconfigure(0, weight=1)
-
-        self.capture_status = ctk.CTkLabel(
-            self.capture_area,
-            text="Menyiapkan sesi foto...",
-            font=("Segoe UI", 30, "bold"),
-            text_color=FG_TEXT
+        self.capture_area.grid_rowconfigure(
+            0,
+            weight=1
         )
-        self.capture_status.grid(
+        self.capture_area.grid_columnconfigure(
+            0,
+            weight=1
+        )
+
+        self.live_cam = LiveCamSidebar(
+            self.capture_area,
+            show_filter_button=False,
+            fill_parent=True
+        )
+        self.live_cam.grid(
             row=0,
             column=0,
-            padx=40,
-            pady=40
+            sticky="nsew"
         )
 
-        # Sidebar membuat live_cam.
         self._build_sidebar()
-
-        # Footer membuat status_label.
         self._build_footer()
+
+        self.after(
+            200,
+            self._start_live_cam
+        )
 
     def clear_screen(self):
         if self.current_page is not None:
@@ -805,10 +1062,6 @@ class App(ctk.CTk):
             text_color=FG_TEXT,
         ).pack(anchor="w", padx=18, pady=(2, 10))
 
-        # Live camera
-        self.live_cam = LiveCamSidebar(self.sidebar)
-        self.live_cam.pack(padx=14, pady=(0, 10), fill="x")
-
         # Timer manual 2-10 detik.
         timer_card = ctk.CTkFrame(self.sidebar, fg_color=BG_CARD, corner_radius=CORNER_RADIUS, border_width=1, border_color=BORDER)
         timer_card.pack(padx=14, pady=(0, 10), fill="x")
@@ -890,9 +1143,6 @@ class App(ctk.CTk):
             ).pack(side="left", padx=9)
 
         ctk.CTkLabel(info, text="", height=8).pack()
-
-        # Start live preview
-        self._start_live_cam()
 
     def _build_footer(self):
         footer = ctk.CTkFrame(self, fg_color=BG_MID, corner_radius=0, height=38, border_width=0)
