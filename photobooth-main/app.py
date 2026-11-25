@@ -21,6 +21,7 @@ from idle_timer import IdleTimer
 from ui.home import HomePage
 from ui.templateMenu import TemplatePage
 from ui.templatePreview import TemplatePreviewPage
+from ui.templateSetup import TemplateSetupPage
 
 
 # ── Theme ──────────────────────────────────────────────────────────
@@ -833,7 +834,8 @@ class App(ctk.CTk):
             self.page_container,
             templates=templates,
             on_back=self.show_home_page,
-            on_select=self.show_template_preview_page
+            on_select=self.show_template_preview_page,
+            on_create=self.show_template_setup_page
         )
 
         self.current_page.pack(
@@ -841,6 +843,33 @@ class App(ctk.CTk):
             expand=True
         )
 
+    def show_template_setup_page(self):
+        self.clear_screen()
+
+        self.current_page = TemplateSetupPage(
+            self.page_container,
+            on_back=self.show_template_page,
+            on_continue=self.handle_template_setup
+        )
+
+        self.current_page.pack(
+            fill="both",
+            expand=True
+        )
+
+    def handle_template_setup(self, setup_data):
+        template_name = setup_data["name"]
+        width = setup_data["width"]
+        height = setup_data["height"]
+
+        messagebox.showinfo(
+            "Setup berhasil",
+            f"Template: {template_name}\n"
+            f"Resolusi: {width} × {height} px\n\n"
+            "Selanjutnya data ini akan dikirim "
+            "ke halaman editor template."
+        )
+    
     def show_template_preview_page(self, template_data):
         self.clear_screen()
 

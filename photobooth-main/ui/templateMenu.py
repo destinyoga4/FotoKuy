@@ -14,7 +14,8 @@ class TemplatePage(ctk.CTkFrame):
         parent,
         templates,
         on_back=None,
-        on_select=None
+        on_select=None,
+        on_create=None
     ):
         super().__init__(
             parent,
@@ -24,6 +25,7 @@ class TemplatePage(ctk.CTkFrame):
         self.templates = templates
         self.on_back = on_back
         self.on_select = on_select
+        self.on_create = on_create
         self.template_images = []
 
         self.build_ui()
@@ -146,7 +148,7 @@ class TemplatePage(ctk.CTkFrame):
             hover_color="#1d2d48",
             border_width=2,
             border_color="#34d3ad",
-            command=self.show_create_template_message
+            command=self.open_template_setup
         )
         create_card.grid(
             row=0,
@@ -280,8 +282,6 @@ class TemplatePage(ctk.CTkFrame):
         if self.on_back:
             self.on_back()
 
-    def show_create_template_message(self):
-        messagebox.showinfo(
-            "Coming Soon",
-            "Template Studio masih dalam tahap pengembangan."
-        )
+    def open_template_setup(self):
+        if self.on_create:
+            self.on_create()
